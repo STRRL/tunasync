@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,6 +65,34 @@ func TestHTTPServer(t *testing.T) {
 			So(msg[_errorKey], ShouldEqual, fmt.Sprintf("failed to list jobs of worker %s: %s", _magicBadWorkerID, "database fail"))
 		})
 
+		Convey("when register multiple workers", func(ctx C) {
+			N := 10
+			var cnt uint32
+			for i := 0; i < N; i++ {
+				go func(id int) {
+					w := WorkerStatus{
+						ID: fmt.Sprintf("worker%d", id),
+					}
+					resp, err := PostJSON(baseURL+"/workers", w, nil)
+					ctx.So(err, ShouldBeNil)
+					ctx.So(resp.StatusCode, ShouldEqual, http.StatusOK)
+					atomic.AddUint32(&cnt, 1)
+				}(i)
+			}
+			time.Sleep(2 * time.Second)
+			So(cnt, ShouldEqual, N)
+
+			Convey("list all workers", func(ctx C) {
+				resp, err := http.Get(baseURL + "/workers")
+				So(err, ShouldBeNil)
+				defer resp.Body.Close()
+				var actualResponseObj []WorkerStatus
+				err = json.NewDecoder(resp.Body).Decode(&actualResponseObj)
+				So(err, ShouldBeNil)
+				So(len(actualResponseObj), ShouldEqual, N+1)
+			})
+		})
+
 		Convey("when register a worker", func(ctx C) {
 			w := WorkerStatus{
 				ID: "test_worker1",
@@ -109,7 +138,7 @@ func TestHTTPServer(t *testing.T) {
 				So(res[_errorKey], ShouldEqual, "invalid workerID "+invalidWorker)
 			})
 
-			Convey("flush  disabled jobs", func(ctx C) {
+			Convey("flush disabled jobs", func(ctx C) {
 				req, err := http.NewRequest("DELETE", baseURL+"/jobs/disabled", nil)
 				So(err, ShouldBeNil)
 				clt := &http.Client{}
@@ -151,7 +180,38 @@ func TestHTTPServer(t *testing.T) {
 					So(m.Size, ShouldEqual, status.Size)
 					So(m.IsMaster, ShouldEqual, status.IsMaster)
 					So(time.Now().Sub(m.LastUpdate), ShouldBeLessThan, 1*time.Second)
+					So(m.LastStarted.IsZero(), ShouldBeTrue) // hasn't been initialized yet
 					So(time.Now().Sub(m.LastEnded), ShouldBeLessThan, 1*time.Second)
+
+				})
+
+				// start syncing
+				status.Status = PreSyncing
+				time.Sleep(1 * time.Second)
+				resp, err = PostJSON(fmt.Sprintf("%s/workers/%s/jobs/%s", baseURL, status.Worker, status.Name), status, nil)
+				So(err, ShouldBeNil)
+				defer resp.Body.Close()
+				So(resp.StatusCode, ShouldEqual, http.StatusOK)
+
+				Convey("update mirror status to PreSync - starting sync", func(ctx C) {
+					var ms []MirrorStatus
+					resp, err := GetJSON(baseURL+"/workers/test_worker1/jobs", &ms, nil)
+
+					So(err, ShouldBeNil)
+					So(resp.StatusCode, ShouldEqual, http.StatusOK)
+					// err = json.NewDecoder(resp.Body).Decode(&mirrorStatusList)
+					m := ms[0]
+					So(m.Name, ShouldEqual, status.Name)
+					So(m.Worker, ShouldEqual, status.Worker)
+					So(m.Status, ShouldEqual, status.Status)
+					So(m.Upstream, ShouldEqual, status.Upstream)
+					So(m.Size, ShouldEqual, status.Size)
+					So(m.IsMaster, ShouldEqual, status.IsMaster)
+					So(time.Now().Sub(m.LastUpdate), ShouldBeLessThan, 3*time.Second)
+					So(time.Now().Sub(m.LastUpdate), ShouldBeGreaterThan, 1*time.Second)
+					So(time.Now().Sub(m.LastStarted), ShouldBeLessThan, 2*time.Second)
+					So(time.Now().Sub(m.LastEnded), ShouldBeLessThan, 3*time.Second)
+					So(time.Now().Sub(m.LastEnded), ShouldBeGreaterThan, 1*time.Second)
 
 				})
 
@@ -167,8 +227,9 @@ func TestHTTPServer(t *testing.T) {
 					So(m.Upstream, ShouldEqual, status.Upstream)
 					So(m.Size, ShouldEqual, status.Size)
 					So(m.IsMaster, ShouldEqual, status.IsMaster)
-					So(time.Now().Sub(m.LastUpdate.Time), ShouldBeLessThan, 1*time.Second)
-					So(time.Now().Sub(m.LastEnded.Time), ShouldBeLessThan, 1*time.Second)
+					So(time.Now().Sub(m.LastUpdate.Time), ShouldBeLessThan, 3*time.Second)
+					So(time.Now().Sub(m.LastStarted.Time), ShouldBeLessThan, 2*time.Second)
+					So(time.Now().Sub(m.LastEnded.Time), ShouldBeLessThan, 3*time.Second)
 
 				})
 
@@ -197,8 +258,9 @@ func TestHTTPServer(t *testing.T) {
 						So(m.Upstream, ShouldEqual, status.Upstream)
 						So(m.Size, ShouldEqual, "5GB")
 						So(m.IsMaster, ShouldEqual, status.IsMaster)
-						So(time.Now().Sub(m.LastUpdate), ShouldBeLessThan, 1*time.Second)
-						So(time.Now().Sub(m.LastEnded), ShouldBeLessThan, 1*time.Second)
+						So(time.Now().Sub(m.LastUpdate), ShouldBeLessThan, 3*time.Second)
+						So(time.Now().Sub(m.LastStarted), ShouldBeLessThan, 2*time.Second)
+						So(time.Now().Sub(m.LastEnded), ShouldBeLessThan, 3*time.Second)
 					})
 				})
 
@@ -251,6 +313,7 @@ func TestHTTPServer(t *testing.T) {
 					So(m.Size, ShouldEqual, status.Size)
 					So(m.IsMaster, ShouldEqual, status.IsMaster)
 					So(time.Now().Sub(m.LastUpdate), ShouldBeGreaterThan, 3*time.Second)
+					So(time.Now().Sub(m.LastStarted), ShouldBeGreaterThan, 3*time.Second)
 					So(time.Now().Sub(m.LastEnded), ShouldBeLessThan, 1*time.Second)
 				})
 			})
@@ -258,14 +321,15 @@ func TestHTTPServer(t *testing.T) {
 			Convey("update mirror status of an inexisted worker", func(ctx C) {
 				invalidWorker := "test_worker2"
 				status := MirrorStatus{
-					Name:       "arch-sync2",
-					Worker:     invalidWorker,
-					IsMaster:   true,
-					Status:     Success,
-					LastUpdate: time.Now(),
-					LastEnded:  time.Now(),
-					Upstream:   "mirrors.tuna.tsinghua.edu.cn",
-					Size:       "4GB",
+					Name:        "arch-sync2",
+					Worker:      invalidWorker,
+					IsMaster:    true,
+					Status:      Success,
+					LastUpdate:  time.Now(),
+					LastStarted: time.Now(),
+					LastEnded:   time.Now(),
+					Upstream:    "mirrors.tuna.tsinghua.edu.cn",
+					Size:        "4GB",
 				}
 				resp, err := PostJSON(fmt.Sprintf("%s/workers/%s/jobs/%s",
 					baseURL, status.Worker, status.Name), status, nil)
@@ -396,6 +460,15 @@ func (b *mockDBAdapter) CreateWorker(w WorkerStatus) (WorkerStatus, error) {
 	// }
 	b.workerStore[w.ID] = w
 	return w, nil
+}
+
+func (b *mockDBAdapter) RefreshWorker(workerID string) (w WorkerStatus, err error) {
+	w, err = b.GetWorker(workerID)
+	if err == nil {
+		w.LastOnline = time.Now()
+		w, err = b.CreateWorker(w)
+	}
+	return w, err
 }
 
 func (b *mockDBAdapter) GetMirrorStatus(workerID, mirrorID string) (MirrorStatus, error) {

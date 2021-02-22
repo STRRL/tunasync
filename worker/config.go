@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/BurntSushi/toml"
+	"github.com/imdario/mergo"
 )
 
 type providerEnum uint8
@@ -33,14 +34,16 @@ func (p *providerEnum) UnmarshalText(text []byte) error {
 
 // Config represents worker config options
 type Config struct {
-	Global  globalConfig   `toml:"global"`
-	Manager managerConfig  `toml:"manager"`
-	Server  serverConfig   `toml:"server"`
-	Cgroup  cgroupConfig   `toml:"cgroup"`
-	ZFS     zfsConfig      `toml:"zfs"`
-	Docker  dockerConfig   `toml:"docker"`
-	Include includeConfig  `toml:"include"`
-	Mirrors []mirrorConfig `toml:"mirrors"`
+	Global        globalConfig        `toml:"global"`
+	Manager       managerConfig       `toml:"manager"`
+	Server        serverConfig        `toml:"server"`
+	Cgroup        cgroupConfig        `toml:"cgroup"`
+	ZFS           zfsConfig           `toml:"zfs"`
+	BtrfsSnapshot btrfsSnapshotConfig `toml:"btrfs_snapshot"`
+	Docker        dockerConfig        `toml:"docker"`
+	Include       includeConfig       `toml:"include"`
+	MirrorsConf   []mirrorConfig      `toml:"mirrors"`
+	Mirrors       []mirrorConfig
 }
 
 type globalConfig struct {
@@ -50,6 +53,7 @@ type globalConfig struct {
 	Concurrent int    `toml:"concurrent"`
 	Interval   int    `toml:"interval"`
 	Retry      int    `toml:"retry"`
+	Timeout    int    `toml:"timeout"`
 
 	ExecOnSuccess []string `toml:"exec_on_success"`
 	ExecOnFailure []string `toml:"exec_on_failure"`
@@ -96,6 +100,11 @@ type zfsConfig struct {
 	Zpool  string `toml:"zpool"`
 }
 
+type btrfsSnapshotConfig struct {
+	Enable       bool   `toml:"enable"`
+	SnapshotPath string `toml:"snapshot_path"`
+}
+
 type includeConfig struct {
 	IncludeMirrors string `toml:"include_mirrors"`
 }
@@ -105,15 +114,17 @@ type includedMirrorConfig struct {
 }
 
 type mirrorConfig struct {
-	Name      string            `toml:"name"`
-	Provider  providerEnum      `toml:"provider"`
-	Upstream  string            `toml:"upstream"`
-	Interval  int               `toml:"interval"`
-	Retry     int               `toml:"retry"`
-	MirrorDir string            `toml:"mirror_dir"`
-	LogDir    string            `toml:"log_dir"`
-	Env       map[string]string `toml:"env"`
-	Role      string            `toml:"role"`
+	Name         string            `toml:"name"`
+	Provider     providerEnum      `toml:"provider"`
+	Upstream     string            `toml:"upstream"`
+	Interval     int               `toml:"interval"`
+	Retry        int               `toml:"retry"`
+	Timeout      int               `toml:"timeout"`
+	MirrorDir    string            `toml:"mirror_dir"`
+	MirrorSubDir string            `toml:"mirror_subdir"`
+	LogDir       string            `toml:"log_dir"`
+	Env          map[string]string `toml:"env"`
+	Role         string            `toml:"role"`
 
 	// These two options over-write the global options
 	ExecOnSuccess []string `toml:"exec_on_success"`
@@ -123,19 +134,29 @@ type mirrorConfig struct {
 	ExecOnSuccessExtra []string `toml:"exec_on_success_extra"`
 	ExecOnFailureExtra []string `toml:"exec_on_failure_extra"`
 
-	Command       string `toml:"command"`
-	UseIPv6       bool   `toml:"use_ipv6"`
-	UseIPv4       bool   `toml:"use_ipv4"`
-	ExcludeFile   string `toml:"exclude_file"`
-	Username      string `toml:"username"`
-	Password      string `toml:"password"`
-	Stage1Profile string `toml:"stage1_profile"`
+	Command       string   `toml:"command"`
+	FailOnMatch   string   `toml:"fail_on_match"`
+	SizePattern   string   `toml:"size_pattern"`
+	UseIPv6       bool     `toml:"use_ipv6"`
+	UseIPv4       bool     `toml:"use_ipv4"`
+	ExcludeFile   string   `toml:"exclude_file"`
+	Username      string   `toml:"username"`
+	Password      string   `toml:"password"`
+	RsyncNoTimeo  bool     `toml:"rsync_no_timeout"`
+	RsyncTimeout  int      `toml:"rsync_timeout"`
+	RsyncOptions  []string `toml:"rsync_options"`
+	RsyncOverride []string `toml:"rsync_override"`
+	Stage1Profile string   `toml:"stage1_profile"`
 
 	MemoryLimit string `toml:"memory_limit"`
 
 	DockerImage   string   `toml:"docker_image"`
 	DockerVolumes []string `toml:"docker_volumes"`
 	DockerOptions []string `toml:"docker_options"`
+
+	SnapshotPath string `toml:"snapshot_path"`
+
+	ChildMirrors []mirrorConfig `toml:"mirrors"`
 }
 
 // LoadConfig loads configuration
@@ -162,9 +183,36 @@ func LoadConfig(cfgFile string) (*Config, error) {
 				logger.Errorf(err.Error())
 				return nil, err
 			}
-			cfg.Mirrors = append(cfg.Mirrors, incMirCfg.Mirrors...)
+			cfg.MirrorsConf = append(cfg.MirrorsConf, incMirCfg.Mirrors...)
+		}
+	}
+
+	for _, m := range cfg.MirrorsConf {
+		if err := recursiveMirrors(cfg, nil, m); err != nil {
+			return nil, err
 		}
 	}
 
 	return cfg, nil
+}
+
+func recursiveMirrors(cfg *Config, parent *mirrorConfig, mirror mirrorConfig) error {
+	var curMir mirrorConfig
+	if parent != nil {
+		curMir = *parent
+	}
+	curMir.ChildMirrors = nil
+	if err := mergo.Merge(&curMir, mirror, mergo.WithOverride); err != nil {
+		return err
+	}
+	if mirror.ChildMirrors == nil {
+		cfg.Mirrors = append(cfg.Mirrors, curMir)
+	} else {
+		for _, m := range mirror.ChildMirrors {
+			if err := recursiveMirrors(cfg, &curMir, m); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

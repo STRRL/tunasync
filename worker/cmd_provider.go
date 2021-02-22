@@ -2,9 +2,12 @@ package worker
 
 import (
 	"errors"
+	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/anmitsu/go-shlex"
+	"github.com/tuna/tunasync/internal"
 )
 
 type cmdConfig struct {
@@ -13,13 +16,19 @@ type cmdConfig struct {
 	workingDir, logDir, logFile string
 	interval                    time.Duration
 	retry                       int
+	timeout                     time.Duration
 	env                         map[string]string
+	failOnMatch                 string
+	sizePattern                 string
 }
 
 type cmdProvider struct {
 	baseProvider
 	cmdConfig
-	command []string
+	command     []string
+	dataSize    string
+	failOnMatch *regexp.Regexp
+	sizePattern *regexp.Regexp
 }
 
 func newCmdProvider(c cmdConfig) (*cmdProvider, error) {
@@ -33,6 +42,7 @@ func newCmdProvider(c cmdConfig) (*cmdProvider, error) {
 			ctx:      NewContext(),
 			interval: c.interval,
 			retry:    c.retry,
+			timeout:  c.timeout,
 		},
 		cmdConfig: c,
 	}
@@ -46,6 +56,22 @@ func newCmdProvider(c cmdConfig) (*cmdProvider, error) {
 		return nil, err
 	}
 	provider.command = cmd
+	if len(c.failOnMatch) > 0 {
+		var err error
+		failOnMatch, err := regexp.Compile(c.failOnMatch)
+		if err != nil {
+			return nil, errors.New("fail-on-match regexp error: " + err.Error())
+		}
+		provider.failOnMatch = failOnMatch
+	}
+	if len(c.sizePattern) > 0 {
+		var err error
+		sizePattern, err := regexp.Compile(c.sizePattern)
+		if err != nil {
+			return nil, errors.New("size-pattern regexp error: " + err.Error())
+		}
+		provider.sizePattern = sizePattern
+	}
 
 	return provider, nil
 }
@@ -58,11 +84,35 @@ func (p *cmdProvider) Upstream() string {
 	return p.upstreamURL
 }
 
-func (p *cmdProvider) Run() error {
+func (p *cmdProvider) DataSize() string {
+	return p.dataSize
+}
+
+func (p *cmdProvider) Run(started chan empty) error {
+	p.dataSize = ""
+	defer p.closeLogFile()
 	if err := p.Start(); err != nil {
 		return err
 	}
-	return p.Wait()
+	started <- empty{}
+	if err := p.Wait(); err != nil {
+		return err
+	}
+	if p.failOnMatch != nil {
+		matches, err := internal.FindAllSubmatchInFile(p.LogFile(), p.failOnMatch)
+		logger.Infof("FindAllSubmatchInFile: %q\n", matches)
+		if err != nil {
+			return err
+		}
+		if len(matches) != 0 {
+			logger.Debug("Fail-on-match: %r", matches)
+			return fmt.Errorf("Fail-on-match regexp found %d matches", len(matches))
+		}
+	}
+	if p.sizePattern != nil {
+		p.dataSize = internal.ExtractSizeFromLog(p.LogFile(), p.sizePattern)
+	}
+	return nil
 }
 
 func (p *cmdProvider) Start() error {
@@ -92,5 +142,6 @@ func (p *cmdProvider) Start() error {
 		return err
 	}
 	p.isRunning.Store(true)
+	logger.Debugf("set isRunning to true: %s", p.Name())
 	return nil
 }

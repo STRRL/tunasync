@@ -25,6 +25,7 @@ func makeMockManagerServer(recvData chan interface{}) *gin.Engine {
 		var _worker WorkerStatus
 		c.BindJSON(&_worker)
 		_worker.LastOnline = time.Now()
+		_worker.LastRegister = time.Now()
 		recvData <- _worker
 		c.JSON(http.StatusOK, _worker)
 	})
@@ -93,6 +94,8 @@ func TestWorker(t *testing.T) {
 		err := httpServer.ListenAndServe()
 		So(err, ShouldBeNil)
 	}()
+	// Wait for http server starting
+	time.Sleep(500 * time.Millisecond)
 
 	Convey("Worker should work", t, func(ctx C) {
 
@@ -133,7 +136,7 @@ func TestWorker(t *testing.T) {
 						} else if sch, ok := data.(MirrorSchedules); ok {
 							So(len(sch.Schedules), ShouldEqual, 0)
 						}
-					case <-time.After(1 * time.Second):
+					case <-time.After(2 * time.Second):
 						So(registered, ShouldBeTrue)
 						return
 					}
@@ -178,7 +181,7 @@ func TestWorker(t *testing.T) {
 							So(status.Status, ShouldNotEqual, Failed)
 							lastStatus = status.Status
 						}
-					case <-time.After(1 * time.Second):
+					case <-time.After(2 * time.Second):
 						So(url, ShouldNotEqual, "")
 						So(jobRunning, ShouldBeFalse)
 						So(lastStatus, ShouldEqual, Success)
@@ -239,7 +242,7 @@ func TestWorker(t *testing.T) {
 							}
 							lastStatus[status.Name] = status.Status
 						}
-					case <-time.After(1 * time.Second):
+					case <-time.After(2 * time.Second):
 						So(len(lastStatus), ShouldEqual, 3)
 						So(len(nextSch), ShouldEqual, 3)
 						return

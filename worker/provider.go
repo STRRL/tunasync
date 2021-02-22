@@ -24,9 +24,9 @@ type mirrorProvider interface {
 
 	Type() providerEnum
 
-	// run mirror job in background
-	Run() error
-	// run mirror job in background
+	// Start then Wait
+	Run(started chan empty) error
+	// Start the job
 	Start() error
 	// Wait job to finish
 	Wait() error
@@ -46,6 +46,7 @@ type mirrorProvider interface {
 
 	Interval() time.Duration
 	Retry() int
+	Timeout() time.Duration
 
 	WorkingDir() string
 	LogDir() string
@@ -82,7 +83,7 @@ func newMirrorProvider(mirror mirrorConfig, cfg *Config) mirrorProvider {
 	}
 	if mirrorDir == "" {
 		mirrorDir = filepath.Join(
-			cfg.Global.MirrorDir, mirror.Name,
+			cfg.Global.MirrorDir, mirror.MirrorSubDir, mirror.Name,
 		)
 	}
 	if mirror.Interval == 0 {
@@ -90,6 +91,9 @@ func newMirrorProvider(mirror mirrorConfig, cfg *Config) mirrorProvider {
 	}
 	if mirror.Retry == 0 {
 		mirror.Retry = cfg.Global.Retry
+	}
+	if mirror.Timeout == 0 {
+		mirror.Timeout = cfg.Global.Timeout
 	}
 	logDir = formatLogDir(logDir, mirror)
 
@@ -112,61 +116,76 @@ func newMirrorProvider(mirror mirrorConfig, cfg *Config) mirrorProvider {
 			upstreamURL: mirror.Upstream,
 			command:     mirror.Command,
 			workingDir:  mirrorDir,
+			failOnMatch: mirror.FailOnMatch,
+			sizePattern: mirror.SizePattern,
 			logDir:      logDir,
 			logFile:     filepath.Join(logDir, "latest.log"),
 			interval:    time.Duration(mirror.Interval) * time.Minute,
 			retry:       mirror.Retry,
+			timeout:     time.Duration(mirror.Timeout) * time.Second,
 			env:         mirror.Env,
 		}
 		p, err := newCmdProvider(pc)
-		p.isMaster = isMaster
 		if err != nil {
 			panic(err)
 		}
+		p.isMaster = isMaster
 		provider = p
 	case provRsync:
 		rc := rsyncConfig{
-			name:        mirror.Name,
-			upstreamURL: mirror.Upstream,
-			rsyncCmd:    mirror.Command,
-			username:    mirror.Username,
-			password:    mirror.Password,
-			excludeFile: mirror.ExcludeFile,
-			workingDir:  mirrorDir,
-			logDir:      logDir,
-			logFile:     filepath.Join(logDir, "latest.log"),
-			useIPv6:     mirror.UseIPv6,
-			useIPv4:     mirror.UseIPv4,
-			interval:    time.Duration(mirror.Interval) * time.Minute,
-			retry:       mirror.Retry,
+			name:              mirror.Name,
+			upstreamURL:       mirror.Upstream,
+			rsyncCmd:          mirror.Command,
+			username:          mirror.Username,
+			password:          mirror.Password,
+			excludeFile:       mirror.ExcludeFile,
+			extraOptions:      mirror.RsyncOptions,
+			rsyncNeverTimeout: mirror.RsyncNoTimeo,
+			rsyncTimeoutValue: mirror.RsyncTimeout,
+			overriddenOptions: mirror.RsyncOverride,
+			rsyncEnv:          mirror.Env,
+			workingDir:        mirrorDir,
+			logDir:            logDir,
+			logFile:           filepath.Join(logDir, "latest.log"),
+			useIPv6:           mirror.UseIPv6,
+			useIPv4:           mirror.UseIPv4,
+			interval:          time.Duration(mirror.Interval) * time.Minute,
+			retry:             mirror.Retry,
+			timeout:           time.Duration(mirror.Timeout) * time.Second,
 		}
 		p, err := newRsyncProvider(rc)
-		p.isMaster = isMaster
 		if err != nil {
 			panic(err)
 		}
+		p.isMaster = isMaster
 		provider = p
 	case provTwoStageRsync:
 		rc := twoStageRsyncConfig{
-			name:          mirror.Name,
-			stage1Profile: mirror.Stage1Profile,
-			upstreamURL:   mirror.Upstream,
-			rsyncCmd:      mirror.Command,
-			username:      mirror.Username,
-			password:      mirror.Password,
-			excludeFile:   mirror.ExcludeFile,
-			workingDir:    mirrorDir,
-			logDir:        logDir,
-			logFile:       filepath.Join(logDir, "latest.log"),
-			useIPv6:       mirror.UseIPv6,
-			interval:      time.Duration(mirror.Interval) * time.Minute,
-			retry:         mirror.Retry,
+			name:              mirror.Name,
+			stage1Profile:     mirror.Stage1Profile,
+			upstreamURL:       mirror.Upstream,
+			rsyncCmd:          mirror.Command,
+			username:          mirror.Username,
+			password:          mirror.Password,
+			excludeFile:       mirror.ExcludeFile,
+			extraOptions:      mirror.RsyncOptions,
+			rsyncNeverTimeout: mirror.RsyncNoTimeo,
+			rsyncTimeoutValue: mirror.RsyncTimeout,
+			rsyncEnv:          mirror.Env,
+			workingDir:        mirrorDir,
+			logDir:            logDir,
+			logFile:           filepath.Join(logDir, "latest.log"),
+			useIPv6:           mirror.UseIPv6,
+			useIPv4:           mirror.UseIPv4,
+			interval:          time.Duration(mirror.Interval) * time.Minute,
+			retry:             mirror.Retry,
+			timeout:           time.Duration(mirror.Timeout) * time.Second,
 		}
 		p, err := newTwoStageRsyncProvider(rc)
-		p.isMaster = isMaster
 		if err != nil {
 			panic(err)
 		}
+		p.isMaster = isMaster
 		provider = p
 	default:
 		panic(errors.New("Invalid mirror provider"))
@@ -178,6 +197,11 @@ func newMirrorProvider(mirror mirrorConfig, cfg *Config) mirrorProvider {
 	// Add ZFS Hook
 	if cfg.ZFS.Enable {
 		provider.AddHook(newZfsHook(provider, cfg.ZFS.Zpool))
+	}
+
+	// Add Btrfs Snapshot Hook
+	if cfg.BtrfsSnapshot.Enable {
+		provider.AddHook(newBtrfsSnapshotHook(provider, cfg.BtrfsSnapshot.SnapshotPath, mirror))
 	}
 
 	// Add Docker Hook

@@ -61,7 +61,7 @@ func NewTUNASyncWorker(cfg *Config) *Worker {
 
 // Run runs worker forever
 func (w *Worker) Run() {
-	w.registorWorker()
+	w.registerWorker()
 	go w.runHTTPServer()
 	w.runSchedule()
 }
@@ -393,7 +393,7 @@ func (w *Worker) URL() string {
 	return fmt.Sprintf("%s://%s:%d/", proto, w.cfg.Server.Hostname, w.cfg.Server.Port)
 }
 
-func (w *Worker) registorWorker() {
+func (w *Worker) registerWorker() {
 	msg := WorkerStatus{
 		ID:  w.Name(),
 		URL: w.URL(),
@@ -402,8 +402,17 @@ func (w *Worker) registorWorker() {
 	for _, root := range w.cfg.Manager.APIBaseList() {
 		url := fmt.Sprintf("%s/workers", root)
 		logger.Debugf("register on manager url: %s", url)
-		if _, err := PostJSON(url, msg, w.httpClient); err != nil {
-			logger.Errorf("Failed to register worker")
+		for retry := 10; retry > 0; {
+			if _, err := PostJSON(url, msg, w.httpClient); err != nil {
+				logger.Errorf("Failed to register worker")
+				retry--
+				if retry > 0 {
+					time.Sleep(1 * time.Second)
+					logger.Noticef("Retrying... (%d)", retry)
+				}
+			} else {
+				break
+			}
 		}
 	}
 }

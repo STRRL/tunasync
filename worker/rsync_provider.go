@@ -2,7 +2,7 @@ package worker
 
 import (
 	"errors"
-	"io/ioutil"
+	"fmt"
 	"strings"
 	"time"
 
@@ -13,10 +13,16 @@ type rsyncConfig struct {
 	name                                         string
 	rsyncCmd                                     string
 	upstreamURL, username, password, excludeFile string
+	extraOptions                                 []string
+	overriddenOptions                            []string
+	rsyncNeverTimeout                            bool
+	rsyncTimeoutValue                            int
+	rsyncEnv                                     map[string]string
 	workingDir, logDir, logFile                  string
 	useIPv6, useIPv4                             bool
 	interval                                     time.Duration
 	retry                                        int
+	timeout                                      time.Duration
 }
 
 // An RsyncProvider provides the implementation to rsync-based syncing jobs
@@ -41,6 +47,7 @@ func newRsyncProvider(c rsyncConfig) (*rsyncProvider, error) {
 			ctx:      NewContext(),
 			interval: c.interval,
 			retry:    c.retry,
+			timeout:  c.timeout,
 		},
 		rsyncConfig: c,
 	}
@@ -48,12 +55,32 @@ func newRsyncProvider(c rsyncConfig) (*rsyncProvider, error) {
 	if c.rsyncCmd == "" {
 		provider.rsyncCmd = "rsync"
 	}
+	if c.rsyncEnv == nil {
+		provider.rsyncEnv = map[string]string{}
+	}
+	if c.username != "" {
+		provider.rsyncEnv["USER"] = c.username
+	}
+	if c.password != "" {
+		provider.rsyncEnv["RSYNC_PASSWORD"] = c.password
+	}
 
 	options := []string{
 		"-aHvh", "--no-o", "--no-g", "--stats",
-		"--exclude", ".~tmp~/",
+		"--exclude", ".~tmp~/", "--filter" , "risk .~tmp~/",
 		"--delete", "--delete-after", "--delay-updates",
-		"--safe-links", "--timeout=120", "--contimeout=120",
+		"--safe-links",
+	}
+	if c.overriddenOptions != nil {
+		options = c.overriddenOptions
+	}
+
+	if !c.rsyncNeverTimeout {
+		timeo := 120
+		if c.rsyncTimeoutValue > 0 {
+			timeo = c.rsyncTimeoutValue
+		}
+		options = append(options, fmt.Sprintf("--timeout=%d", timeo))
 	}
 
 	if c.useIPv6 {
@@ -64,6 +91,9 @@ func newRsyncProvider(c rsyncConfig) (*rsyncProvider, error) {
 
 	if c.excludeFile != "" {
 		options = append(options, "--exclude-from", c.excludeFile)
+	}
+	if c.extraOptions != nil {
+		options = append(options, c.extraOptions...)
 	}
 	provider.options = options
 
@@ -86,17 +116,24 @@ func (p *rsyncProvider) DataSize() string {
 	return p.dataSize
 }
 
-func (p *rsyncProvider) Run() error {
+func (p *rsyncProvider) Run(started chan empty) error {
 	p.dataSize = ""
+	defer p.closeLogFile()
 	if err := p.Start(); err != nil {
 		return err
 	}
+	started <- empty{}
 	if err := p.Wait(); err != nil {
+		code, msg := internal.TranslateRsyncErrorCode(err)
+		if code != 0 {
+			logger.Debug("Rsync exitcode %d (%s)", code, msg)
+			if p.logFileFd != nil {
+				p.logFileFd.WriteString(msg + "\n")
+			}
+		}
 		return err
 	}
-	if logContent, err := ioutil.ReadFile(p.LogFile()); err == nil {
-		p.dataSize = internal.ExtractSizeFromRsyncLog(logContent)
-	}
+	p.dataSize = internal.ExtractSizeFromRsyncLog(p.LogFile())
 	return nil
 }
 
@@ -108,18 +145,11 @@ func (p *rsyncProvider) Start() error {
 		return errors.New("provider is currently running")
 	}
 
-	env := map[string]string{}
-	if p.username != "" {
-		env["USER"] = p.username
-	}
-	if p.password != "" {
-		env["RSYNC_PASSWORD"] = p.password
-	}
 	command := []string{p.rsyncCmd}
 	command = append(command, p.options...)
 	command = append(command, p.upstreamURL, p.WorkingDir())
 
-	p.cmd = newCmdJob(p, command, p.WorkingDir(), env)
+	p.cmd = newCmdJob(p, command, p.WorkingDir(), p.rsyncEnv)
 	if err := p.prepareLogFile(false); err != nil {
 		return err
 	}
@@ -128,5 +158,6 @@ func (p *rsyncProvider) Start() error {
 		return err
 	}
 	p.isRunning.Store(true)
+	logger.Debugf("set isRunning to true: %s", p.Name())
 	return nil
 }

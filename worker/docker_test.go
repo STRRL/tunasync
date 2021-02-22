@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,13 +13,27 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
+func cmdRun(p string, args []string) {
+	cmd := exec.Command(p, args...)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Debugf("cmdRun failed %s", err)
+		return
+	}
+	logger.Debugf("cmdRun: ", string(out))
+}
+
 func getDockerByName(name string) (string, error) {
 	// docker ps -f 'name=$name' --format '{{.Names}}'
 	out, err := sh.Command(
-		"docker", "ps",
+		"docker", "ps", "-a",
 		"--filter", "name="+name,
 		"--format", "{{.Names}}",
 	).Output()
+	if err == nil {
+		logger.Debugf("docker ps: '%s'", string(out))
+	}
 	return string(out), err
 }
 
@@ -46,7 +61,7 @@ func TestDocker(t *testing.T) {
 
 		cmdScriptContent := `#!/bin/sh
 echo ${TEST_CONTENT}
-sleep 10
+sleep 20
 `
 		err = ioutil.WriteFile(cmdScript, []byte(cmdScriptContent), 0755)
 		So(err, ShouldBeNil)
@@ -55,8 +70,10 @@ sleep 10
 		So(err, ShouldBeNil)
 
 		d := &dockerHook{
-			provider: provider,
-			image:    "alpine",
+			emptyHook: emptyHook{
+				provider: provider,
+			},
+			image: "alpine:3.8",
 			volumes: []string{
 				fmt.Sprintf("%s:%s", cmdScript, "/bin/cmd.sh"),
 			},
@@ -67,12 +84,27 @@ sleep 10
 		err = d.preExec()
 		So(err, ShouldBeNil)
 
+		cmdRun("docker", []string{"images"})
+		exitedErr := make(chan error, 1)
 		go func() {
-			err = provider.Run()
-			ctx.So(err, ShouldNotBeNil)
+			err = provider.Run(make(chan empty, 1))
+			logger.Debugf("provider.Run() exited")
+			if err != nil {
+				logger.Errorf("provider.Run() failed: %v", err)
+			}
+			exitedErr <- err
 		}()
 
-		time.Sleep(1 * time.Second)
+		// Wait for docker running
+		for wait := 0; wait < 8; wait++ {
+			names, err := getDockerByName(d.Name())
+			So(err, ShouldBeNil)
+			if names != "" {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		// cmdRun("ps", []string{"aux"})
 
 		// assert container running
 		names, err := getDockerByName(d.Name())
@@ -81,6 +113,9 @@ sleep 10
 
 		err = provider.Terminate()
 		So(err, ShouldBeNil)
+
+		// cmdRun("ps", []string{"aux"})
+		<-exitedErr
 
 		// container should be terminated and removed
 		names, err = getDockerByName(d.Name())

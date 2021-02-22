@@ -1,8 +1,7 @@
-tunasync
-========
+# tunasync
 
-[![Build Status](https://travis-ci.org/tuna/tunasync.svg?branch=dev)](https://travis-ci.org/tuna/tunasync)
-[![Coverage Status](https://coveralls.io/repos/github/tuna/tunasync/badge.svg?branch=dev)](https://coveralls.io/github/tuna/tunasync?branch=dev)
+![Build Status](https://github.com/tuna/tunasync/workflows/tunasync/badge.svg)
+[![Coverage Status](https://coveralls.io/repos/github/tuna/tunasync/badge.svg?branch=master)](https://coveralls.io/github/tuna/tunasync?branch=master)
 [![Commitizen friendly](https://img.shields.io/badge/commitizen-friendly-brightgreen.svg)](http://commitizen.github.io/cz-cli/)
 ![GPLv3](https://img.shields.io/badge/license-GPLv3-blue.svg)
 
@@ -12,11 +11,11 @@ tunasync
 
 ## Download
 
-Pre-built binary for Linux x86_64 is available at [Github releases](https://github.com/tuna/tunasync/releases/latest).
+Pre-built binary for Linux x86_64 and ARM64 is available at [Github releases](https://github.com/tuna/tunasync/releases/latest).
 
 ## Design
 
-```
+```text
 # Architecture
 
 - Manager: Central instance for status and job management
@@ -40,27 +39,22 @@ Pre-built binary for Linux x86_64 is available at [Github releases](https://gith
 # Job Run Process
 
 
-PreSyncing           Syncing                               Success
-+-----------+     +-----------+    +-------------+     +--------------+
-|  pre-job  +--+->|  job run  +--->|  post-exec  +-+-->| post-success |
-+-----------+  ^  +-----------+    +-------------+ |   +--------------+
-               |                                   |
-               |      +-----------------+          | Failed
-               +------+    post-fail    |<---------+
-                      +-----------------+
+PreSyncing                           Syncing                               Success
++-----------+     +----------+    +-----------+    +-------------+     +--------------+
+|  pre-job  +--+->| pre-exec +--->|  job run  +--->|  post-exec  +-+-->| post-success |
++-----------+  ^  +----------+    +-----------+    +-------------+ |   +--------------+
+               |                                                   |
+               |                +-----------------+                | Failed
+               +----------------+    post-fail    |<---------------+
+                                +-----------------+
 ```
-
 
 ## Building
 
-Setup GOPATH like [this](https://golang.org/cmd/go/#hdr-GOPATH_environment_variable).
+Go version: 1.13
 
-Then:
-
-```
-go get -d github.com/tuna/tunasync/cmd/tunasync
-cd $GOPATH/src/github.com/tuna/tunasync
-make
+```shell
+> make all
 ```
 
-If you have multiple `GOPATH`s, replace the `$GOPATH` with your first one.
+Binaries in the `build-linux-amd64/`.

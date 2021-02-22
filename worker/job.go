@@ -113,7 +113,7 @@ func (m *mirrorJob) Run(managerChan chan<- jobMessage, semaphore chan empty) err
 				managerChan <- jobMessage{
 					tunasync.Failed, m.Name(),
 					fmt.Sprintf("error exec hook %s: %s", hookname, err.Error()),
-					false,
+					true,
 				}
 				return err
 			}
@@ -155,23 +155,42 @@ func (m *mirrorJob) Run(managerChan chan<- jobMessage, semaphore chan empty) err
 
 			var syncErr error
 			syncDone := make(chan error, 1)
+			started := make(chan empty, 10) // we may receive "started" more than one time (e.g. two_stage_rsync)
 			go func() {
-				err := provider.Run()
+				err := provider.Run(started)
 				syncDone <- err
 			}()
 
+			select { // Wait until provider started or error happened
+			case err := <-syncDone:
+				logger.Errorf("failed to start provider %s: %s", m.Name(), err.Error())
+				syncDone <- err // it will be read again later
+			case <-started:
+				logger.Debug("provider started")
+			}
+			// Now terminating the provider is feasible
+
+			var termErr error
+			timeout := provider.Timeout()
+			if timeout <= 0 {
+				timeout = 100000 * time.Hour // never time out
+			}
 			select {
 			case syncErr = <-syncDone:
 				logger.Debug("syncing done")
+			case <-time.After(timeout):
+				logger.Notice("provider timeout")
+				termErr = provider.Terminate()
+				syncErr = fmt.Errorf("%s timeout after %v", m.Name(), timeout)
 			case <-kill:
 				logger.Debug("received kill")
 				stopASAP = true
-				err := provider.Terminate()
-				if err != nil {
-					logger.Errorf("failed to terminate provider %s: %s", m.Name(), err.Error())
-					return err
-				}
+				termErr = provider.Terminate()
 				syncErr = errors.New("killed by manager")
+			}
+			if termErr != nil {
+				logger.Errorf("failed to terminate provider %s: %s", m.Name(), termErr.Error())
+				return termErr
 			}
 
 			// post-exec hooks
@@ -183,27 +202,33 @@ func (m *mirrorJob) Run(managerChan chan<- jobMessage, semaphore chan empty) err
 			if syncErr == nil {
 				// syncing success
 				logger.Noticef("succeeded syncing %s", m.Name())
-				m.size = provider.DataSize()
-				managerChan <- jobMessage{tunasync.Success, m.Name(), "", (m.State() == stateReady)}
 				// post-success hooks
+				logger.Debug("post-success hooks")
 				err := runHooks(rHooks, func(h jobHook) error { return h.postSuccess() }, "post-success")
 				if err != nil {
 					return err
 				}
-				return nil
+			} else {
+				// syncing failed
+				logger.Warningf("failed syncing %s: %s", m.Name(), syncErr.Error())
+				// post-fail hooks
+				logger.Debug("post-fail hooks")
+				err := runHooks(rHooks, func(h jobHook) error { return h.postFail() }, "post-fail")
+				if err != nil {
+					return err
+				}
+			}
 
+			if syncErr == nil {
+				// syncing success
+				m.size = provider.DataSize()
+				managerChan <- jobMessage{tunasync.Success, m.Name(), "", (m.State() == stateReady)}
+				return nil
 			}
 
 			// syncing failed
-			logger.Warningf("failed syncing %s: %s", m.Name(), syncErr.Error())
 			managerChan <- jobMessage{tunasync.Failed, m.Name(), syncErr.Error(), (retry == provider.Retry()-1) && (m.State() == stateReady)}
 
-			// post-fail hooks
-			logger.Debug("post-fail hooks")
-			err = runHooks(rHooks, func(h jobHook) error { return h.postFail() }, "post-fail")
-			if err != nil {
-				return err
-			}
 			// gracefully exit
 			if stopASAP {
 				logger.Debug("No retry, exit directly")

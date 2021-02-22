@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ func TestRsyncProvider(t *testing.T) {
 			logDir:      tmpDir,
 			logFile:     tmpFile,
 			useIPv6:     true,
+			timeout:     100 * time.Second,
 			interval:    600 * time.Second,
 		}
 
@@ -39,6 +41,7 @@ func TestRsyncProvider(t *testing.T) {
 		So(provider.LogDir(), ShouldEqual, c.logDir)
 		So(provider.LogFile(), ShouldEqual, c.logFile)
 		So(provider.Interval(), ShouldEqual, c.interval)
+		So(provider.Timeout(), ShouldEqual, c.timeout)
 
 		Convey("When entering a context (auto exit)", func() {
 			func() {
@@ -88,14 +91,14 @@ exit 0
 					"Done\n",
 				targetDir,
 				fmt.Sprintf(
-					"-aHvh --no-o --no-g --stats --exclude .~tmp~/ "+
+					"-aHvh --no-o --no-g --stats --exclude .~tmp~/ --filter risk .~tmp~/ "+
 						"--delete --delete-after --delay-updates --safe-links "+
-						"--timeout=120 --contimeout=120 -6 %s %s",
+						"--timeout=120 -6 %s %s",
 					provider.upstreamURL, provider.WorkingDir(),
 				),
 			)
 
-			err = provider.Run()
+			err = provider.Run(make(chan empty, 1))
 			So(err, ShouldBeNil)
 			loggedContent, err := ioutil.ReadFile(provider.LogFile())
 			So(err, ShouldBeNil)
@@ -104,6 +107,34 @@ exit 0
 			So(provider.DataSize(), ShouldEqual, "1.33T")
 		})
 
+	})
+	Convey("If the rsync program fails", t, func() {
+		tmpDir, err := ioutil.TempDir("", "tunasync")
+		defer os.RemoveAll(tmpDir)
+		So(err, ShouldBeNil)
+		tmpFile := filepath.Join(tmpDir, "log_file")
+
+		Convey("in the rsyncProvider", func() {
+
+			c := rsyncConfig{
+				name:         "tuna",
+				upstreamURL:  "rsync://rsync.tuna.moe/tuna/",
+				workingDir:   tmpDir,
+				logDir:       tmpDir,
+				logFile:      tmpFile,
+				extraOptions: []string{"--somethine-invalid"},
+				interval:     600 * time.Second,
+			}
+
+			provider, err := newRsyncProvider(c)
+			So(err, ShouldBeNil)
+
+			err = provider.Run(make(chan empty, 1))
+			So(err, ShouldNotBeNil)
+			loggedContent, err := ioutil.ReadFile(provider.LogFile())
+			So(err, ShouldBeNil)
+			So(string(loggedContent), ShouldContainSubstring, "Syntax or usage error")
+		})
 	})
 }
 
@@ -114,18 +145,22 @@ func TestRsyncProviderWithAuthentication(t *testing.T) {
 		So(err, ShouldBeNil)
 		scriptFile := filepath.Join(tmpDir, "myrsync")
 		tmpFile := filepath.Join(tmpDir, "log_file")
+		proxyAddr := "127.0.0.1:1233"
 
 		c := rsyncConfig{
-			name:        "tuna",
-			upstreamURL: "rsync://rsync.tuna.moe/tuna/",
-			rsyncCmd:    scriptFile,
-			username:    "tunasync",
-			password:    "tunasyncpassword",
-			workingDir:  tmpDir,
-			logDir:      tmpDir,
-			logFile:     tmpFile,
-			useIPv6:     true,
-			interval:    600 * time.Second,
+			name:              "tuna",
+			upstreamURL:       "rsync://rsync.tuna.moe/tuna/",
+			rsyncCmd:          scriptFile,
+			username:          "tunasync",
+			password:          "tunasyncpassword",
+			workingDir:        tmpDir,
+			extraOptions:      []string{"--delete-excluded"},
+			rsyncTimeoutValue: 30,
+			rsyncEnv:          map[string]string{"RSYNC_PROXY": proxyAddr},
+			logDir:            tmpDir,
+			logFile:           tmpFile,
+			useIPv4:           true,
+			interval:          600 * time.Second,
 		}
 
 		provider, err := newRsyncProvider(c)
@@ -140,7 +175,7 @@ func TestRsyncProviderWithAuthentication(t *testing.T) {
 		Convey("Let's try a run", func() {
 			scriptContent := `#!/bin/bash
 echo "syncing to $(pwd)"
-echo $USER $RSYNC_PASSWORD $@
+echo $USER $RSYNC_PASSWORD $RSYNC_PROXY $@
 sleep 1
 echo "Done"
 exit 0
@@ -155,14 +190,15 @@ exit 0
 					"Done\n",
 				targetDir,
 				fmt.Sprintf(
-					"%s %s -aHvh --no-o --no-g --stats --exclude .~tmp~/ "+
+					"%s %s %s -aHvh --no-o --no-g --stats --exclude .~tmp~/ --filter risk .~tmp~/ "+
 						"--delete --delete-after --delay-updates --safe-links "+
-						"--timeout=120 --contimeout=120 -6 %s %s",
-					provider.username, provider.password, provider.upstreamURL, provider.WorkingDir(),
+						"--timeout=30 -4 --delete-excluded %s %s",
+					provider.username, provider.password, proxyAddr,
+					provider.upstreamURL, provider.WorkingDir(),
 				),
 			)
 
-			err = provider.Run()
+			err = provider.Run(make(chan empty, 1))
 			So(err, ShouldBeNil)
 			loggedContent, err := ioutil.ReadFile(provider.LogFile())
 			So(err, ShouldBeNil)
@@ -170,6 +206,141 @@ exit 0
 			// fmt.Println(string(loggedContent))
 		})
 
+	})
+}
+
+func TestRsyncProviderWithOverriddenOptions(t *testing.T) {
+	Convey("Rsync Provider with overridden options should work", t, func() {
+		tmpDir, err := ioutil.TempDir("", "tunasync")
+		defer os.RemoveAll(tmpDir)
+		So(err, ShouldBeNil)
+		scriptFile := filepath.Join(tmpDir, "myrsync")
+		tmpFile := filepath.Join(tmpDir, "log_file")
+
+		c := rsyncConfig{
+			name:              "tuna",
+			upstreamURL:       "rsync://rsync.tuna.moe/tuna/",
+			rsyncCmd:          scriptFile,
+			workingDir:        tmpDir,
+			rsyncNeverTimeout: true,
+			overriddenOptions: []string{"-aHvh", "--no-o", "--no-g", "--stats"},
+			extraOptions:      []string{"--delete-excluded"},
+			logDir:            tmpDir,
+			logFile:           tmpFile,
+			useIPv6:           true,
+			interval:          600 * time.Second,
+		}
+
+		provider, err := newRsyncProvider(c)
+		So(err, ShouldBeNil)
+
+		So(provider.Name(), ShouldEqual, c.name)
+		So(provider.WorkingDir(), ShouldEqual, c.workingDir)
+		So(provider.LogDir(), ShouldEqual, c.logDir)
+		So(provider.LogFile(), ShouldEqual, c.logFile)
+		So(provider.Interval(), ShouldEqual, c.interval)
+
+		Convey("Let's try a run", func() {
+			scriptContent := `#!/bin/bash
+echo "syncing to $(pwd)"
+echo $@
+sleep 1
+echo "Done"
+exit 0
+			`
+			err = ioutil.WriteFile(scriptFile, []byte(scriptContent), 0755)
+			So(err, ShouldBeNil)
+
+			targetDir, _ := filepath.EvalSymlinks(provider.WorkingDir())
+			expectedOutput := fmt.Sprintf(
+				"syncing to %s\n"+
+					"-aHvh --no-o --no-g --stats -6 --delete-excluded %s %s\n"+
+					"Done\n",
+				targetDir,
+				provider.upstreamURL,
+				provider.WorkingDir(),
+			)
+
+			err = provider.Run(make(chan empty, 1))
+			So(err, ShouldBeNil)
+			loggedContent, err := ioutil.ReadFile(provider.LogFile())
+			So(err, ShouldBeNil)
+			So(string(loggedContent), ShouldEqual, expectedOutput)
+			// fmt.Println(string(loggedContent))
+		})
+
+	})
+}
+
+func TestRsyncProviderWithDocker(t *testing.T) {
+	Convey("Rsync in Docker should work", t, func() {
+		tmpDir, err := ioutil.TempDir("", "tunasync")
+		defer os.RemoveAll(tmpDir)
+		So(err, ShouldBeNil)
+		scriptFile := filepath.Join(tmpDir, "myrsync")
+		excludeFile := filepath.Join(tmpDir, "exclude.txt")
+
+		g := &Config{
+			Global: globalConfig{
+				Retry: 2,
+			},
+			Docker: dockerConfig{
+				Enable: true,
+				Volumes: []string{
+					scriptFile + ":/bin/myrsync",
+					"/etc/gai.conf:/etc/gai.conf:ro",
+				},
+			},
+		}
+		c := mirrorConfig{
+			Name:        "tuna",
+			Provider:    provRsync,
+			Upstream:    "rsync://rsync.tuna.moe/tuna/",
+			Command:     "/bin/myrsync",
+			ExcludeFile: excludeFile,
+			DockerImage: "alpine:3.8",
+			LogDir:      tmpDir,
+			MirrorDir:   tmpDir,
+			UseIPv6:     true,
+			Timeout:     100,
+			Interval:    600,
+		}
+
+		provider := newMirrorProvider(c, g)
+
+		So(provider.Type(), ShouldEqual, provRsync)
+		So(provider.Name(), ShouldEqual, c.Name)
+		So(provider.WorkingDir(), ShouldEqual, c.MirrorDir)
+		So(provider.LogDir(), ShouldEqual, c.LogDir)
+
+		cmdScriptContent := `#!/bin/sh
+#echo "$@"
+while [[ $# -gt 0 ]]; do
+if [[ "$1" = "--exclude-from" ]]; then
+	cat "$2"
+	shift
+fi
+shift
+done
+`
+		err = ioutil.WriteFile(scriptFile, []byte(cmdScriptContent), 0755)
+		So(err, ShouldBeNil)
+		err = ioutil.WriteFile(excludeFile, []byte("__some_pattern"), 0755)
+		So(err, ShouldBeNil)
+
+		for _, hook := range provider.Hooks() {
+			err = hook.preExec()
+			So(err, ShouldBeNil)
+		}
+		err = provider.Run(make(chan empty, 1))
+		So(err, ShouldBeNil)
+		for _, hook := range provider.Hooks() {
+			err = hook.postExec()
+			So(err, ShouldBeNil)
+		}
+		loggedContent, err := ioutil.ReadFile(provider.LogFile())
+		So(err, ShouldBeNil)
+		So(string(loggedContent), ShouldEqual, "__some_pattern")
 	})
 }
 
@@ -226,7 +397,7 @@ echo $AOSP_REPO_BIN
 			So(err, ShouldBeNil)
 			So(readedScriptContent, ShouldResemble, []byte(scriptContent))
 
-			err = provider.Run()
+			err = provider.Run(make(chan empty, 1))
 			So(err, ShouldBeNil)
 
 			loggedContent, err := ioutil.ReadFile(provider.LogFile())
@@ -242,23 +413,26 @@ echo $AOSP_REPO_BIN
 			So(err, ShouldBeNil)
 			So(readedScriptContent, ShouldResemble, []byte(scriptContent))
 
-			err = provider.Run()
+			err = provider.Run(make(chan empty, 1))
 			So(err, ShouldNotBeNil)
 
 		})
 
 		Convey("If a long job is killed", func(ctx C) {
 			scriptContent := `#!/bin/bash
-sleep 5
+sleep 10
 			`
 			err = ioutil.WriteFile(scriptFile, []byte(scriptContent), 0755)
 			So(err, ShouldBeNil)
 
+			started := make(chan empty, 1)
 			go func() {
-				err = provider.Run()
+				err := provider.Run(started)
 				ctx.So(err, ShouldNotBeNil)
 			}()
 
+			<-started
+			So(provider.IsRunning(), ShouldBeTrue)
 			time.Sleep(1 * time.Second)
 			err = provider.Terminate()
 			So(err, ShouldBeNil)
@@ -294,9 +468,89 @@ sleep 5
 
 		Convey("Run the command", func() {
 
-			err = provider.Run()
+			err = provider.Run(make(chan empty, 1))
 			So(err, ShouldBeNil)
 
+		})
+	})
+	Convey("Command Provider with RegExprs should work", t, func(ctx C) {
+		tmpDir, err := ioutil.TempDir("", "tunasync")
+		defer os.RemoveAll(tmpDir)
+		So(err, ShouldBeNil)
+		tmpFile := filepath.Join(tmpDir, "log_file")
+
+		c := cmdConfig{
+			name:        "run-uptime",
+			upstreamURL: "http://mirrors.tuna.moe/",
+			command:     "uptime",
+			failOnMatch: "",
+			sizePattern: "",
+			workingDir:  tmpDir,
+			logDir:      tmpDir,
+			logFile:     tmpFile,
+			interval:    600 * time.Second,
+		}
+
+		Convey("when fail-on-match regexp matches", func() {
+			c.failOnMatch = `[a-z]+`
+			provider, err := newCmdProvider(c)
+			So(err, ShouldBeNil)
+
+			err = provider.Run(make(chan empty, 1))
+			So(err, ShouldNotBeNil)
+			So(provider.DataSize(), ShouldBeEmpty)
+		})
+
+		Convey("when fail-on-match regexp does not match", func() {
+			c.failOnMatch = `load average_`
+			provider, err := newCmdProvider(c)
+			So(err, ShouldBeNil)
+
+			err = provider.Run(make(chan empty, 1))
+			So(err, ShouldBeNil)
+		})
+
+		Convey("when fail-on-match regexp meets /dev/null", func() {
+			c.failOnMatch = `load average_`
+			c.logFile = "/dev/null"
+			provider, err := newCmdProvider(c)
+			So(err, ShouldBeNil)
+
+			err = provider.Run(make(chan empty, 1))
+			So(err, ShouldNotBeNil)
+		})
+
+		Convey("when size-pattern regexp matches", func() {
+			c.sizePattern = `load average: ([\d\.]+)`
+			provider, err := newCmdProvider(c)
+			So(err, ShouldBeNil)
+
+			err = provider.Run(make(chan empty, 1))
+			So(err, ShouldBeNil)
+			So(provider.DataSize(), ShouldNotBeEmpty)
+			_, err = strconv.ParseFloat(provider.DataSize(), 32)
+			So(err, ShouldBeNil)
+		})
+
+		Convey("when size-pattern regexp does not match", func() {
+			c.sizePattern = `load ave: ([\d\.]+)`
+			provider, err := newCmdProvider(c)
+			So(err, ShouldBeNil)
+
+			err = provider.Run(make(chan empty, 1))
+			So(err, ShouldBeNil)
+			So(provider.DataSize(), ShouldBeEmpty)
+		})
+
+		Convey("when size-pattern regexp meets /dev/null", func() {
+			c.sizePattern = `load ave: ([\d\.]+)`
+			c.logFile = "/dev/null"
+			provider, err := newCmdProvider(c)
+			So(err, ShouldBeNil)
+
+			err = provider.Run(make(chan empty, 1))
+			So(err, ShouldNotBeNil)
+			So(provider.DataSize(), ShouldBeEmpty)
 		})
 	})
 }
@@ -310,17 +564,19 @@ func TestTwoStageRsyncProvider(t *testing.T) {
 		tmpFile := filepath.Join(tmpDir, "log_file")
 
 		c := twoStageRsyncConfig{
-			name:          "tuna-two-stage-rsync",
-			upstreamURL:   "rsync://mirrors.tuna.moe/",
-			stage1Profile: "debian",
-			rsyncCmd:      scriptFile,
-			workingDir:    tmpDir,
-			logDir:        tmpDir,
-			logFile:       tmpFile,
-			useIPv6:       true,
-			excludeFile:   tmpFile,
-			username:      "hello",
-			password:      "world",
+			name:              "tuna-two-stage-rsync",
+			upstreamURL:       "rsync://mirrors.tuna.moe/",
+			stage1Profile:     "debian",
+			rsyncCmd:          scriptFile,
+			workingDir:        tmpDir,
+			logDir:            tmpDir,
+			logFile:           tmpFile,
+			useIPv6:           true,
+			excludeFile:       tmpFile,
+			rsyncTimeoutValue: 30,
+			extraOptions:      []string{"--delete-excluded", "--cache"},
+			username:          "hello",
+			password:          "world",
 		}
 
 		provider, err := newTwoStageRsyncProvider(c)
@@ -344,7 +600,7 @@ exit 0
 			err = ioutil.WriteFile(scriptFile, []byte(scriptContent), 0755)
 			So(err, ShouldBeNil)
 
-			err = provider.Run()
+			err = provider.Run(make(chan empty, 2))
 			So(err, ShouldBeNil)
 
 			targetDir, _ := filepath.EvalSymlinks(provider.WorkingDir())
@@ -357,16 +613,16 @@ exit 0
 					"Done\n",
 				targetDir,
 				fmt.Sprintf(
-					"-aHvh --no-o --no-g --stats --exclude .~tmp~/ --safe-links "+
-						"--timeout=120 --contimeout=120 --exclude dists/ -6 "+
+					"-aHvh --no-o --no-g --stats --exclude .~tmp~/ --filter risk .~tmp~/ --safe-links "+
+						"--include=*.diff/ --exclude=*.diff/Index --exclude=Packages* --exclude=Sources* --exclude=Release* --exclude=InRelease --include=i18n/by-hash --exclude=i18n/* --exclude=ls-lR* --timeout=30 -6 "+
 						"--exclude-from %s %s %s",
 					provider.excludeFile, provider.upstreamURL, provider.WorkingDir(),
 				),
 				targetDir,
 				fmt.Sprintf(
-					"-aHvh --no-o --no-g --stats --exclude .~tmp~/ "+
+					"-aHvh --no-o --no-g --stats --exclude .~tmp~/ --filter risk .~tmp~/ "+
 						"--delete --delete-after --delay-updates --safe-links "+
-						"--timeout=120 --contimeout=120 -6 --exclude-from %s %s %s",
+						"--delete-excluded --cache --timeout=30 -6 --exclude-from %s %s %s",
 					provider.excludeFile, provider.upstreamURL, provider.WorkingDir(),
 				),
 			)
@@ -380,32 +636,65 @@ exit 0
 		Convey("Try terminating", func(ctx C) {
 			scriptContent := `#!/bin/bash
 echo $@
-sleep 4
+sleep 10
 exit 0
 			`
 			err = ioutil.WriteFile(scriptFile, []byte(scriptContent), 0755)
 			So(err, ShouldBeNil)
 
+			started := make(chan empty, 2)
 			go func() {
-				err = provider.Run()
+				err := provider.Run(started)
 				ctx.So(err, ShouldNotBeNil)
 			}()
 
+			<-started
+			So(provider.IsRunning(), ShouldBeTrue)
 			time.Sleep(1 * time.Second)
 			err = provider.Terminate()
 			So(err, ShouldBeNil)
 
 			expectedOutput := fmt.Sprintf(
-				"-aHvh --no-o --no-g --stats --exclude .~tmp~/ --safe-links "+
-					"--timeout=120 --contimeout=120 --exclude dists/ -6 "+
+				"-aHvh --no-o --no-g --stats --exclude .~tmp~/ --filter risk .~tmp~/ --safe-links "+
+					"--include=*.diff/ --exclude=*.diff/Index --exclude=Packages* --exclude=Sources* --exclude=Release* --exclude=InRelease --include=i18n/by-hash --exclude=i18n/* --exclude=ls-lR* --timeout=30 -6 "+
 					"--exclude-from %s %s %s\n",
 				provider.excludeFile, provider.upstreamURL, provider.WorkingDir(),
 			)
 
 			loggedContent, err := ioutil.ReadFile(provider.LogFile())
 			So(err, ShouldBeNil)
-			So(string(loggedContent), ShouldEqual, expectedOutput)
+			So(string(loggedContent), ShouldStartWith, expectedOutput)
 			// fmt.Println(string(loggedContent))
+		})
+	})
+
+	Convey("If the rsync program fails", t, func(ctx C) {
+		tmpDir, err := ioutil.TempDir("", "tunasync")
+		defer os.RemoveAll(tmpDir)
+		So(err, ShouldBeNil)
+		tmpFile := filepath.Join(tmpDir, "log_file")
+
+		Convey("in the twoStageRsyncProvider", func() {
+
+			c := twoStageRsyncConfig{
+				name:          "tuna-two-stage-rsync",
+				upstreamURL:   "rsync://0.0.0.1/",
+				stage1Profile: "debian",
+				workingDir:    tmpDir,
+				logDir:        tmpDir,
+				logFile:       tmpFile,
+				excludeFile:   tmpFile,
+			}
+
+			provider, err := newTwoStageRsyncProvider(c)
+			So(err, ShouldBeNil)
+
+			err = provider.Run(make(chan empty, 2))
+			So(err, ShouldNotBeNil)
+			loggedContent, err := ioutil.ReadFile(provider.LogFile())
+			So(err, ShouldBeNil)
+			So(string(loggedContent), ShouldContainSubstring, "Error in socket I/O")
+
 		})
 	})
 }

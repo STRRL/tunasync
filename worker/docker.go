@@ -3,30 +3,38 @@ package worker
 import (
 	"fmt"
 	"os"
+	"time"
+
+	"github.com/codeskyblue/go-sh"
 )
 
 type dockerHook struct {
 	emptyHook
-	provider mirrorProvider
-	image    string
-	volumes  []string
-	options  []string
+	image   string
+	volumes []string
+	options []string
 }
 
 func newDockerHook(p mirrorProvider, gCfg dockerConfig, mCfg mirrorConfig) *dockerHook {
 	volumes := []string{}
 	volumes = append(volumes, gCfg.Volumes...)
 	volumes = append(volumes, mCfg.DockerVolumes...)
+	if len(mCfg.ExcludeFile) > 0 {
+		arg := fmt.Sprintf("%s:%s:ro", mCfg.ExcludeFile, mCfg.ExcludeFile)
+		volumes = append(volumes, arg)
+	}
 
 	options := []string{}
 	options = append(options, gCfg.Options...)
 	options = append(options, mCfg.DockerOptions...)
 
 	return &dockerHook{
-		provider: p,
-		image:    mCfg.DockerImage,
-		volumes:  volumes,
-		options:  options,
+		emptyHook: emptyHook{
+			provider: p,
+		},
+		image:   mCfg.DockerImage,
+		volumes: volumes,
+		options: options,
 	}
 }
 
@@ -59,6 +67,27 @@ func (d *dockerHook) postExec() error {
 	// sh.Command(
 	// 	"docker", "rm", "-f", d.Name(),
 	// ).Run()
+	name := d.Name()
+	retry := 10
+	for ; retry > 0; retry-- {
+		out, err := sh.Command(
+			"docker", "ps", "-a",
+			"--filter", "name=^"+name+"$",
+			"--format", "{{.Status}}",
+		).Output()
+		if err != nil {
+			logger.Errorf("docker ps failed: %v", err)
+			break
+		}
+		if len(out) == 0 {
+			break
+		}
+		logger.Debugf("container %s still exists: '%s'", name, string(out))
+		time.Sleep(1 * time.Second)
+	}
+	if retry == 0 {
+		logger.Warningf("container %s not removed automatically, next sync may fail", name)
+	}
 	d.provider.ExitContext()
 	return nil
 }

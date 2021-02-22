@@ -1,6 +1,8 @@
 package internal
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -8,25 +10,27 @@ import (
 // A MirrorStatus represents a msg when
 // a worker has done syncing
 type MirrorStatus struct {
-	Name       string     `json:"name"`
-	Worker     string     `json:"worker"`
-	IsMaster   bool       `json:"is_master"`
-	Status     SyncStatus `json:"status"`
-	LastUpdate time.Time  `json:"last_update"`
-	LastEnded  time.Time  `json:"last_ended"`
-	Scheduled  time.Time  `json:"next_schedule"`
-	Upstream   string     `json:"upstream"`
-	Size       string     `json:"size"`
-	ErrorMsg   string     `json:"error_msg"`
+	Name        string     `json:"name"`
+	Worker      string     `json:"worker"`
+	IsMaster    bool       `json:"is_master"`
+	Status      SyncStatus `json:"status"`
+	LastUpdate  time.Time  `json:"last_update"`
+	LastStarted time.Time  `json:"last_started"`
+	LastEnded   time.Time  `json:"last_ended"`
+	Scheduled   time.Time  `json:"next_schedule"`
+	Upstream    string     `json:"upstream"`
+	Size        string     `json:"size"`
+	ErrorMsg    string     `json:"error_msg"`
 }
 
 // A WorkerStatus is the information struct that describe
 // a worker, and sent from the manager to clients.
 type WorkerStatus struct {
-	ID         string    `json:"id"`
-	URL        string    `json:"url"`         // worker url
-	Token      string    `json:"token"`       // session token
-	LastOnline time.Time `json:"last_online"` // last seen
+	ID           string    `json:"id"`
+	URL          string    `json:"url"`           // worker url
+	Token        string    `json:"token"`         // session token
+	LastOnline   time.Time `json:"last_online"`   // last seen
+	LastRegister time.Time `json:"last_register"` // last register time
 }
 
 type MirrorSchedules struct {
@@ -58,21 +62,45 @@ const (
 )
 
 func (c CmdVerb) String() string {
-	switch c {
-	case CmdStart:
-		return "start"
-	case CmdStop:
-		return "stop"
-	case CmdDisable:
-		return "disable"
-	case CmdRestart:
-		return "restart"
-	case CmdPing:
-		return "ping"
-	case CmdReload:
-		return "reload"
+	mapping := map[CmdVerb]string{
+		CmdStart:   "start",
+		CmdStop:    "stop",
+		CmdDisable: "disable",
+		CmdRestart: "restart",
+		CmdPing:    "ping",
+		CmdReload:  "reload",
 	}
-	return "unknown"
+	return mapping[c]
+}
+
+func NewCmdVerbFromString(s string) CmdVerb {
+	mapping := map[string]CmdVerb{
+		"start":   CmdStart,
+		"stop":    CmdStop,
+		"disable": CmdDisable,
+		"restart": CmdRestart,
+		"ping":    CmdPing,
+		"reload":  CmdReload,
+	}
+	return mapping[s]
+}
+
+// Marshal and Unmarshal for CmdVerb
+func (s CmdVerb) MarshalJSON() ([]byte, error) {
+	buffer := bytes.NewBufferString(`"`)
+	buffer.WriteString(s.String())
+	buffer.WriteString(`"`)
+	return buffer.Bytes(), nil
+}
+
+func (s *CmdVerb) UnmarshalJSON(b []byte) error {
+	var j string
+	err := json.Unmarshal(b, &j)
+	if err != nil {
+		return err
+	}
+	*s = NewCmdVerbFromString(j)
+	return nil
 }
 
 // A WorkerCmd is the command message send from the

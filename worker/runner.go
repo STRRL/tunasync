@@ -104,7 +104,7 @@ func newCmdJob(provider mirrorProvider, cmdAndArgs []string, workingDir string, 
 }
 
 func (c *cmdJob) Start() error {
-	// logger.Debugf("Command start: %v", c.cmd.Args)
+	logger.Debugf("Command start: %v", c.cmd.Args)
 	c.finished = make(chan empty, 1)
 	return c.cmd.Start()
 }
@@ -118,9 +118,6 @@ func (c *cmdJob) Wait() error {
 		return c.retErr
 	default:
 		err := c.cmd.Wait()
-		if c.cmd.Stdout != nil {
-			c.cmd.Stdout.(*os.File).Close()
-		}
 		c.retErr = err
 		close(c.finished)
 		return err
@@ -152,10 +149,10 @@ func (c *cmdJob) Terminate() error {
 	select {
 	case <-time.After(2 * time.Second):
 		unix.Kill(c.cmd.Process.Pid, syscall.SIGKILL)
-		return errors.New("SIGTERM failed to kill the job")
+		logger.Warningf("SIGTERM failed to kill the job in 2s. SIGKILL sent")
 	case <-c.finished:
-		return nil
 	}
+	return nil
 }
 
 // Copied from go-sh

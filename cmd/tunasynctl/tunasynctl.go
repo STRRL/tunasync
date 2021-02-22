@@ -8,11 +8,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/urfave/cli"
 	"gopkg.in/op/go-logging.v1"
-	"gopkg.in/urfave/cli.v1"
 
 	tunasync "github.com/tuna/tunasync/internal"
 )
@@ -32,7 +33,7 @@ const (
 	userCfgFile   = "$HOME/.config/tunasync/ctl.conf" // user-specific conf
 )
 
-var logger = logging.MustGetLogger("tunasynctl-cmd")
+var logger = logging.MustGetLogger("tunasynctl")
 
 var baseURL string
 var client *http.Client
@@ -41,7 +42,7 @@ func initializeWrapper(handler cli.ActionFunc) cli.ActionFunc {
 	return func(c *cli.Context) error {
 		err := initialize(c)
 		if err != nil {
-			return cli.NewExitError("", 1)
+			return cli.NewExitError(err.Error(), 1)
 		}
 		return handler(c)
 	}
@@ -55,8 +56,9 @@ type config struct {
 
 func loadConfig(cfgFile string, cfg *config) error {
 	if cfgFile != "" {
+		logger.Infof("Loading config: %s", cfgFile)
 		if _, err := toml.DecodeFile(cfgFile, cfg); err != nil {
-			logger.Errorf(err.Error())
+			// logger.Errorf(err.Error())
 			return err
 		}
 	}
@@ -66,7 +68,7 @@ func loadConfig(cfgFile string, cfg *config) error {
 
 func initialize(c *cli.Context) error {
 	// init logger
-	tunasync.InitLogger(c.Bool("verbose"), c.Bool("verbose"), false)
+	tunasync.InitLogger(c.Bool("verbose"), c.Bool("debug"), false)
 
 	cfg := new(config)
 
@@ -76,14 +78,23 @@ func initialize(c *cli.Context) error {
 
 	// find config file and load config
 	if _, err := os.Stat(systemCfgFile); err == nil {
-		loadConfig(systemCfgFile, cfg)
+		err = loadConfig(systemCfgFile, cfg)
+		if err != nil {
+			return err
+		}
 	}
-	fmt.Println(os.ExpandEnv(userCfgFile))
+	logger.Debug("user config file: %s", os.ExpandEnv(userCfgFile))
 	if _, err := os.Stat(os.ExpandEnv(userCfgFile)); err == nil {
-		loadConfig(os.ExpandEnv(userCfgFile), cfg)
+		err = loadConfig(os.ExpandEnv(userCfgFile), cfg)
+		if err != nil {
+			return err
+		}
 	}
 	if c.String("config") != "" {
-		loadConfig(c.String("config"), cfg)
+		err := loadConfig(c.String("config"), cfg)
+		if err != nil {
+			return err
+		}
 	}
 
 	// override config using the command-line arguments
@@ -112,7 +123,7 @@ func initialize(c *cli.Context) error {
 	client, err = tunasync.CreateHTTPClient(cfg.CACert)
 	if err != nil {
 		err = fmt.Errorf("Error initializing HTTP client: %s", err.Error())
-		logger.Error(err.Error())
+		// logger.Error(err.Error())
 		return err
 
 	}
@@ -135,7 +146,7 @@ func listWorkers(c *cli.Context) error {
 				err.Error()),
 			1)
 	}
-	fmt.Print(string(b))
+	fmt.Println(string(b))
 	return nil
 }
 
@@ -150,8 +161,31 @@ func listJobs(c *cli.Context) error {
 					"of all jobs from manager server: %s", err.Error()),
 				1)
 		}
-		genericJobs = jobs
-
+		if statusStr := c.String("status"); statusStr != "" {
+			filteredJobs := make([]tunasync.WebMirrorStatus, 0, len(jobs))
+			var statuses []tunasync.SyncStatus
+			for _, s := range strings.Split(statusStr, ",") {
+				var status tunasync.SyncStatus
+				err = status.UnmarshalJSON([]byte("\"" + strings.TrimSpace(s) + "\""))
+				if err != nil {
+					return cli.NewExitError(
+						fmt.Sprintf("Error parsing status: %s", err.Error()),
+						1)
+				}
+				statuses = append(statuses, status)
+			}
+			for _, job := range jobs {
+				for _, s := range statuses {
+					if job.Status == s {
+						filteredJobs = append(filteredJobs, job)
+						break
+					}
+				}
+			}
+			genericJobs = filteredJobs
+		} else {
+			genericJobs = jobs
+		}
 	} else {
 		var jobs []tunasync.MirrorStatus
 		args := c.Args()
@@ -167,25 +201,65 @@ func listJobs(c *cli.Context) error {
 				_, err := tunasync.GetJSON(fmt.Sprintf("%s/workers/%s/jobs",
 					baseURL, workerID), &workerJobs, client)
 				if err != nil {
-					logger.Errorf("Filed to correctly get jobs"+
+					logger.Infof("Failed to correctly get jobs"+
 						" for worker %s: %s", workerID, err.Error())
 				}
 				ans <- workerJobs
 			}(workerID)
 		}
 		for range args {
-			jobs = append(jobs, <-ans...)
+			job := <-ans
+			if job == nil {
+				return cli.NewExitError(
+					fmt.Sprintf("Failed to correctly get information "+
+						"of jobs from at least one manager"),
+					1)
+			}
+			jobs = append(jobs, job...)
 		}
 		genericJobs = jobs
 	}
 
-	b, err := json.MarshalIndent(genericJobs, "", "  ")
-	if err != nil {
-		return cli.NewExitError(
-			fmt.Sprintf("Error printing out informations: %s", err.Error()),
-			1)
+	if format := c.String("format"); format != "" {
+		tpl := template.New("")
+		_, err := tpl.Parse(format)
+		if err != nil {
+			return cli.NewExitError(
+				fmt.Sprintf("Error parsing format template: %s", err.Error()),
+				1)
+		}
+		switch jobs := genericJobs.(type) {
+		case []tunasync.WebMirrorStatus:
+			for _, job := range jobs {
+				err = tpl.Execute(os.Stdout, job)
+				if err != nil {
+					return cli.NewExitError(
+						fmt.Sprintf("Error printing out information: %s", err.Error()),
+						1)
+				}
+				fmt.Println()
+			}
+		case []tunasync.MirrorStatus:
+			for _, job := range jobs {
+				err = tpl.Execute(os.Stdout, job)
+				if err != nil {
+					return cli.NewExitError(
+						fmt.Sprintf("Error printing out information: %s", err.Error()),
+						1)
+				}
+				fmt.Println()
+			}
+		}
+	} else {
+		b, err := json.MarshalIndent(genericJobs, "", "  ")
+		if err != nil {
+			return cli.NewExitError(
+				fmt.Sprintf("Error printing out information: %s", err.Error()),
+				1)
+		}
+		fmt.Println(string(b))
 	}
-	fmt.Printf(string(b))
+
 	return nil
 }
 
@@ -236,7 +310,7 @@ func updateMirrorSize(c *cli.Context) error {
 		)
 	}
 
-	logger.Infof("Successfully updated mirror size to %s", mirrorSize)
+	fmt.Printf("Successfully updated mirror size to %s\n", mirrorSize)
 	return nil
 }
 
@@ -279,9 +353,9 @@ func removeWorker(c *cli.Context) error {
 	res := map[string]string{}
 	err = json.NewDecoder(resp.Body).Decode(&res)
 	if res["message"] == "deleted" {
-		logger.Info("Successfully removed the worker")
+		fmt.Println("Successfully removed the worker")
 	} else {
-		logger.Info("Failed to remove the worker")
+		return cli.NewExitError("Failed to remove the worker", 1)
 	}
 	return nil
 }
@@ -314,7 +388,7 @@ func flushDisabledJobs(c *cli.Context) error {
 			1)
 	}
 
-	logger.Info("Successfully flushed disabled jobs")
+	fmt.Println("Successfully flushed disabled jobs")
 	return nil
 }
 
@@ -367,7 +441,7 @@ func cmdJob(cmd tunasync.CmdVerb) cli.ActionFunc {
 				" command: HTTP status code is not 200: %s", body),
 				1)
 		}
-		logger.Info("Succesfully send command")
+		fmt.Println("Successfully send the command")
 
 		return nil
 	}
@@ -405,7 +479,7 @@ func cmdWorker(cmd tunasync.CmdVerb) cli.ActionFunc {
 				" command: HTTP status code is not 200: %s", body),
 				1)
 		}
-		logger.Info("Succesfully send command")
+		fmt.Println("Successfully send the command")
 
 		return nil
 	}
@@ -462,6 +536,10 @@ func main() {
 			Name:  "verbose, v",
 			Usage: "Enable verbosely logging",
 		},
+		cli.BoolFlag{
+			Name:  "debug",
+			Usage: "Enable debugging logging",
+		},
 	}
 	cmdFlags := []cli.Flag{
 		cli.StringFlag{
@@ -484,6 +562,14 @@ func main() {
 					cli.BoolFlag{
 						Name:  "all, a",
 						Usage: "List all jobs of all workers",
+					},
+					cli.StringFlag{
+						Name:  "status, s",
+						Usage: "Filter output based on status provided",
+					},
+					cli.StringFlag{
+						Name:  "format, f",
+						Usage: "Pretty-print containers using a Go template",
 					},
 				}...),
 			Action: initializeWrapper(listJobs),

@@ -16,9 +16,11 @@ type baseProvider struct {
 	name     string
 	interval time.Duration
 	retry    int
+	timeout  time.Duration
 	isMaster bool
 
 	cmd       *cmdJob
+	logFileFd *os.File
 	isRunning atomic.Value
 
 	cgroup *cgroupHook
@@ -53,6 +55,10 @@ func (p *baseProvider) Interval() time.Duration {
 
 func (p *baseProvider) Retry() int {
 	return p.retry
+}
+
+func (p *baseProvider) Timeout() time.Duration {
+	return p.timeout
 }
 
 func (p *baseProvider) IsMaster() bool {
@@ -128,11 +134,20 @@ func (p *baseProvider) prepareLogFile(append bool) error {
 		logger.Errorf("Error opening logfile %s: %s", p.LogFile(), err.Error())
 		return err
 	}
+	p.logFileFd = logFile
 	p.cmd.SetLogFile(logFile)
 	return nil
 }
 
-func (p *baseProvider) Run() error {
+func (p *baseProvider) closeLogFile() (err error) {
+	if p.logFileFd != nil {
+		err = p.logFileFd.Close()
+		p.logFileFd = nil
+	}
+	return
+}
+
+func (p *baseProvider) Run(started chan empty) error {
 	panic("Not Implemented")
 }
 
@@ -159,6 +174,7 @@ func (p *baseProvider) Terminate() error {
 	defer p.Unlock()
 	logger.Debugf("terminating provider: %s", p.Name())
 	if !p.IsRunning() {
+		logger.Warningf("Terminate() called while IsRunning is false: %s", p.Name())
 		return nil
 	}
 

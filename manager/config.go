@@ -2,7 +2,7 @@ package manager
 
 import (
 	"github.com/BurntSushi/toml"
-	"gopkg.in/urfave/cli.v1"
+	"github.com/urfave/cli"
 )
 
 // A Config is the top-level toml-serializaible config struct
@@ -29,6 +29,7 @@ type FileConfig struct {
 	CACert string `toml:"ca_cert"`
 }
 
+// LoadConfig loads config from specified file
 func LoadConfig(cfgFile string, c *cli.Context) (*Config, error) {
 
 	cfg := new(Config)
